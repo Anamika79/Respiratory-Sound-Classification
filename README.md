@@ -1,88 +1,111 @@
-# Food Delivery Time Prediction & Late-Delivery Classification
+# Classification of Lung Respiratory Sounds
 
-Predicting how long an Indian food delivery order will take (regression) and flagging orders at risk of delay (classification), using **Linear Regression** and a tuned **Decision Tree**.
+A deep learning project that classifies breathing cycles from lung auscultation recordings into **Normal**, **Crackle**, **Wheeze**, or **Both**, using log-mel spectrograms and a convolutional neural network (CNN).
 
 ## Overview
 
-This project works on a single dataset of Indian food delivery orders and solves two related tasks:
+Respiratory diseases such as COPD, asthma and pneumonia are commonly screened by listening to lung sounds with a stethoscope. Abnormal sounds, mainly **crackles** and **wheezes**, are important indicators, but manual auscultation is subjective and depends on the clinician's experience.
 
-| Task | Model | Target |
-|---|---|---|
-| Regression | Linear Regression (OLS) | `Time_taken(min)` – delivery time in minutes |
-| Classification | Decision Tree (tuned with GridSearchCV) | `Delivery_Status` – On-time / Delayed |
+This project builds an automated pipeline that:
+1. Segments each recording into respiratory cycles using the dataset's annotations
+2. Converts each cycle to a log-mel spectrogram
+3. Classifies the cycle with a CNN into one of four classes
 
-An order is labelled **Delayed** if its delivery time is above the median delivery time of the **training set**, and **On-time** otherwise. This gives two roughly balanced classes. Note that "Delayed" here means *slower than typical*, not late against a promised delivery time.
-
-Both models use the same train/test split so they can be compared fairly.
+| Label | Class | Meaning |
+|:-----:|-------|---------|
+| 0 | Normal | No adventitious sounds |
+| 1 | Crackle | Crackles only |
+| 2 | Wheeze | Wheezes only |
+| 3 | Both | Crackles and wheezes |
 
 ## Dataset
 
-- **Source:** [Food Delivery Dataset by Gaurav Malik (Kaggle)](https://www.kaggle.com/datasets/gauravmalik26/food-delivery-dataset)
-- **Size:** about 45,000 orders from Indian cities
-- **File used:** `train.csv` only (`test.csv` has no delivery times)
-- **Columns:** delivery partner age and ratings, restaurant and delivery coordinates, order date and times, weather, road traffic density, vehicle condition, order type, vehicle type, multiple deliveries, festival, city type, and `Time_taken(min)`
+**Respiratory Sound Database (ICBHI 2017 Challenge)**
+Source: [Kaggle - vbookshelf/respiratory-sound-database](https://www.kaggle.com/datasets/vbookshelf/respiratory-sound-database)
 
-The dataset is not included in this repository. Download `train.csv` from Kaggle and place it in the project folder (or upload it in Colab when prompted).
+- 920 annotated recordings from 126 patients
+- 6,898 respiratory cycles, each annotated for the presence of crackles and wheezes
+- Recordings were collected with different stethoscopes and sample rates, and include real-world noise
+- Patient-level diagnoses (COPD, URTI, pneumonia, etc.) are **heavily imbalanced**, with COPD dominating
 
-## Methodology
+Because of this diagnosis-level imbalance, the project uses the **cycle-level crackle/wheeze labels**, which give a more balanced four-class problem. The cycle-level classes are still imbalanced (Normal is the largest, "Both" the smallest), and this is handled as described below.
 
-1. **Data cleaning**
-   - Stripped trailing whitespace and converted the text `"NaN "` into real null values
-   - Extracted the number from `Time_taken(min)` values such as `"(min) 24"`
-   - Removed the `"conditions "` prefix from `Weatherconditions`
-   - Converted age, ratings and multiple deliveries to numeric types
-   - Removed duplicate orders
-2. **Invalid records:** removed rows with zero or negative coordinates and partner ratings above 5; checked extreme values with the IQR method
-3. **Feature engineering**
-   - Delivery distance in km from restaurant and delivery coordinates (Haversine formula)
-   - Order preparation time (pickup time minus order time, handling midnight crossover)
-   - Order hour, day of week and weekend flag
-4. **Train/test split:** 80/20, fixed random seed, stratified so both classes keep the same proportion
-5. **Preprocessing (fitted on the training set only, to avoid data leakage)**
-   - Median imputation for numeric columns, mode imputation for categorical columns
-   - Ordinal encoding for `Road_traffic_density` (Low < Medium < High < Jam)
-   - One-hot encoding for weather, vehicle type, order type, city and festival
-   - `StandardScaler` for Linear Regression only (trees do not need scaling)
-6. **Linear Regression:** trained on scaled features; checked residual plots, Q-Q plot, coefficients and VIF (multicollinearity)
-7. **Decision Tree:** trained an untuned tree to show overfitting, then tuned `criterion`, `max_depth`, `min_samples_split` and `min_samples_leaf` with `GridSearchCV` (5-fold stratified CV, scored on F1)
+> The dataset is not included in this repository. The notebook downloads it automatically via `kagglehub`.
+
+## Approach
+
+```
+Audio (.wav) + annotations (.txt)
+        │
+        ▼
+Cycle segmentation (start/end times)
+        │
+        ▼
+Resample to 8 kHz → pad/crop to 5 s → peak normalisation
+        │
+        ▼
+Log-mel spectrogram (64 mel bands, n_fft=512, hop=128)
+        │
+        ▼
+CNN (4 conv blocks + GAP + dense) → softmax over 4 classes
+```
+
+**Handling class imbalance and avoiding data leakage**
+- **Patient-wise split** (train / validation / test), so no patient appears in more than one split. A random split would leak data, since one patient has many similar recordings.
+- **Class weights** in the loss function
+- **SpecAugment** (frequency and time masking) applied to training data only
+- **Evaluation with imbalance-aware metrics**: macro-F1, balanced accuracy, per-class precision/recall, confusion matrix, and the official **ICBHI score** (average of specificity and sensitivity)
+
+**Model**
+- 4 convolutional blocks (32, 64, 128, 128 filters) with BatchNorm, ReLU, MaxPooling and Dropout
+- Global average pooling, a dense layer (64) and a softmax output
+- Adam optimiser, early stopping and learning-rate scheduling
 
 ## Results
 
-All numbers below are on the held-out test set (8,300 orders).
+Baseline CNN trained from scratch, evaluated on held-out test patients (1,698 cycles):
 
-### Linear Regression (delivery time in minutes)
-
-| Metric | Train | Test |
-|---|---|---|
-| MAE (min) | 4.849 | 4.840 |
-| RMSE (min) | 6.072 | 6.033 |
-| R² | 0.583 | 0.580 |
-
-The near-identical train and test scores show no overfitting. The model explains about 58% of the variation in delivery time, and predictions are off by roughly 5 minutes on average.
-
-### Decision Tree classifier (On-time / Delayed)
-
-| Metric | Test |
-|---|---|
-| Accuracy | 0.8551 |
-| Precision (Delayed) | 0.8757 |
-| Recall (Delayed) | 0.7949 |
-| F1-score (Delayed) | 0.8333 |
-| ROC-AUC | 0.9315 |
-
-Train accuracy is 0.8645 against a test accuracy of 0.8551, a gap of about 1 point, so tuning controlled overfitting.
+| Metric | Score |
+|--------|:-----:|
+| Accuracy | 0.427 |
+| Balanced accuracy | 0.384 |
+| Macro F1 | 0.374 |
+| ICBHI score | 0.424 (Sp = 0.368, Se = 0.479) |
 
 | Class | Precision | Recall | F1 | Support |
-|---|---|---|---|---|
-| On-time | 0.84 | 0.91 | 0.87 | 4517 |
-| Delayed | 0.88 | 0.79 | 0.83 | 3783 |
+|-------|:---------:|:------:|:--:|:-------:|
+| Normal | 0.565 | 0.368 | 0.446 | 798 |
+| Crackle | 0.387 | 0.643 | 0.484 | 516 |
+| Wheeze | 0.464 | 0.234 | 0.311 | 222 |
+| Both | 0.225 | 0.290 | 0.253 | 162 |
 
-The tree misses roughly 1 in 5 truly delayed orders (Delayed recall 0.79), which is its main limitation.
+**Observations**
+- The model detects crackles best (highest recall), while wheeze and the combined class are hardest. They are the smallest classes, and a small CNN trained from scratch has little data to learn from.
+- Results come from a strict patient-wise split, so they are lower, but more realistic, than random-split results reported in some papers.
 
-## Tools
+**Requirements:** Python 3.9+, TensorFlow 2.x, Librosa, scikit-learn, pandas, NumPy, Matplotlib, Seaborn
 
-Python, Pandas, NumPy, Scikit-learn, Statsmodels, Matplotlib, Seaborn, Google Colab
+## Limitations
+
+- Trained on a single dataset of limited size; results may not generalise to other devices or clinical settings
+- Classification is on pre-segmented cycles, so it depends on the dataset's annotations
+- Metrics come from one train/test split; with about 100 test patients, results can vary between splits
+- This is an educational project and **not a medical diagnostic tool**
+
+## Future Work
+
+- Transfer learning with pretrained models (EfficientNet, YAMNet, PANNs, Audio Spectrogram Transformer)
+- Waveform-level augmentation (noise, pitch shift, time stretch) and mixup
+- Multi-seed or cross-validated evaluation reported as mean ± std
+- Diagnosis-level classification (e.g. Healthy / COPD / Other) with appropriate rebalancing
+- Model deployment as a simple web demo
 
 ## Acknowledgements
 
-Dataset by Gaurav Malik on Kaggle.
+Dataset provided by the ICBHI 2017 Challenge organisers and shared on Kaggle by vbookshelf.
+
+## Author
+
+Anamika J
+- GitHub: github.com/Anamika79
+- LinkedIn: linkedin.com/in/anamika-j
